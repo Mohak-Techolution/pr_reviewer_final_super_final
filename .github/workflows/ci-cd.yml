@@ -85,3 +85,61 @@ jobs:
         run: |
           # Sample deploy to the server
           # ssh user@<SERVER_IP> "cd /path/to/project && git pull && npm install && npm run build"
+  pr-ruleset-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Get list of changed files
+        id: changed-files
+        uses: actions/github-script@v6
+        with:
+          script: |
+            // Correct usage of GitHub API to list files in a pull request
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+            // Map the filenames to a list
+            const changedFiles = files.map(file => file.filename);
+            // Return the list of changed files as a JSON string
+            return { changedFiles: JSON.stringify(changedFiles) };
+
+      - name: Get content of changed files
+        id: file-contents
+        run: |
+          // Parse the JSON string of changed files into an array
+          CHANGED_FILES=$(echo '${{ steps.changed-files.outputs.changedFiles }}' | jq -c '.[]')
+          CONTENTS=""
+          // Iterate through each file and get its base64-encoded content
+          for file in $CHANGED_FILES; do
+            FILE=$(echo $file | tr -d '"')
+            CONTENT=$(cat $FILE | base64 | tr -d '\n')
+            CONTENTS="$CONTENTS{\"filename\":\"$FILE\",\"content\":\"$CONTENT\"},"
+          done
+          // Assemble the contents into a JSON array
+          CONTENTS="[${CONTENTS%,}]"
+          // Set the JSON array as output
+          echo "::set-output name=file-contents::$CONTENTS"
+
+      - name: Call the external API
+        id: call-api
+        run: |
+          // Send the file contents to the external API
+          FILE_CONTENTS=${{ steps.file-contents.outputs.file-contents }}
+          API_RESPONSE=$(curl -X POST -H "Content-Type: application/json" -d "{\"files\":${FILE_CONTENTS}}" https://b48c-139-167-129-22.ngrok-free.app/recieve_content_from_github)
+          // Set the API response as output
+          echo "::set-output name=api-response::$API_RESPONSE"
+
+      - name: Check API response and block PR if needed
+        run: |
+          // Check the API response for a "fail" indication
+          API_RESPONSE=${{ steps.call-api.outputs.api-response }}
+          if [[ "$API_RESPONSE" == *"fail"* ]]; then
+            echo "Blocking PR merge based on API response"
+            exit 1
+          else
+            echo "PR can be merged"
+          fi
